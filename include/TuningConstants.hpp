@@ -35,8 +35,15 @@ extern float kp;         // proportional constant 6e-4
 extern float kd;         // derivative constant 0.56
 extern float ki;         // integral constant
 
-// TUNE: Low pass filter constant T
+// TUNE: Low pass filter constant T (only used when the ball filter is disabled)
 extern float T;
+
+// TUNE: BALL KALMAN FILTER
+extern float R_MEAS;      // measurement variance [px^2] (sigma = sqrt(R_MEAS) px)
+extern float Q_ACCEL;     // acceleration noise variance [px^2/s^4] (~sqrt(Q_ACCEL) px/s^2)
+extern float KF_GATE;     // association gate on the normalised innovation^2 (9 = 3 sigma)
+extern int KF_COAST_MS;   // keep predicting this long after the last accepted measurement
+extern int KF_MAX_MISSES; // consecutive rejected detections before re-acquiring
 
 // TUNE: MOTOR VELOCITIES AND ACCELERATIONS
 extern int vel_home;

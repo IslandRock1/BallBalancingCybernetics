@@ -29,10 +29,21 @@ float r_max = 15;
 // TUNE: PID CONSTANTS VALUES
 float kp = 0.05;         // proportional constant 6e-4
 float kd = 0.02;         // derivative constant 0.56
-float ki = 0.0001;       // integral constant
+float ki = 0.005;       // integral constant
 
-// TUNE: Low pass filter constant T
+// TUNE: Low pass filter constant T (only used when the ball filter is disabled)
 float T = 0.08;
+
+// TUNE: BALL KALMAN FILTER
+// R_MEAS: run the camera with the ball standing still and use the variance of
+// the block position. Integer pixels alone give ~1 px^2.
+// Q_ACCEL: raise it if the estimate lags a moving ball, lower it if the
+// estimate is noisy.
+float R_MEAS = 4.0;        // [px^2], sigma = 2 px
+float Q_ACCEL = 1.0e6;     // [px^2/s^4], sigma = 1000 px/s^2
+float KF_GATE = 9.0;       // 3 sigma per axis
+int KF_COAST_MS = 200;     // ~12 camera frames
+int KF_MAX_MISSES = 8;
 
 // TUNE: MOTOR VELOCITIES AND ACCELERATIONS
 int vel_home = 20;
