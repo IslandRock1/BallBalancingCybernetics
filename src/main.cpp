@@ -25,10 +25,12 @@
 #include "PololuMaestro.h"
 #include <math.h>
 #include <Pixy2SPI_SS.h>
+#include <bits/codecvt.h>
 
 #include "BallFilter.hpp"
 #include "Kinematics.hpp"
 #include "TuningConstants.hpp"
+#include "PID.hpp"
 
 #define maestroSerial SERIAL_PORT_HARDWARE_OPEN  //for teensy
 
@@ -58,10 +60,7 @@ static uint32_t lastMeasureMs = 0;
 static uint32_t tPrevUs = 0;
 
 // **PID**
-float error[2];             // ball position relative to the platform centre [px]
-float error_prev[2];        // previous error, used by the integral and the fallback derivative
-float deriv[2] = {0, 0};    // D input [px/s]: filter velocity, or low-pass filtered derivative
-float integral[2] = {0, 0}; // integral of the error (x, y components)
+PID pid_control;
 float out[2];               // output values (pitch and roll) in degrees
 
 // last speed/acceleration sent to the Maestro, so they only change when needed
@@ -106,14 +105,7 @@ void goHome() {
 }
 
 //forgets the PID history (used whenever control is interrupted)
-void resetPid() {
-  for (int i = 0; i < 2; i++) {
-    error[i] = 0;
-    error_prev[i] = 0;
-    deriv[i] = 0;
-    integral[i] = 0;
-  }
-}
+
 
 // **CAMERA / BALL ESTIMATOR**
 
@@ -213,71 +205,14 @@ bool readBallRaw() {
   if (pixy.ccc.numBlocks != 1) {
     return false;
   }
-  blockToPlatform(0, error[x], error[y]);
+  blockToPlatform(0, pid_control.error[0], pid_control.error[1]);
   return true;
 }
 
-// calculates the Proportional, Derivative and Integral values and moves the servos
-void PID(float dt) {
-  // Fallback: low-pass filtered derivative of the measured position. Only
-  // needed when the ball filter is disabled.
-  if (!USE_BALL_FILTER) {
-    deriv[x] = deriv[x] + dt / T * (-deriv[x] + (error[x] - error_prev[x]) / dt);
-    deriv[y] = deriv[y] + dt / T * (-deriv[y] + (error[y] - error_prev[y]) / dt);
-    if (isnan(deriv[x]) || isinf(deriv[x])) {
-      deriv[x] = 0;
-    }
-    if (isnan(deriv[y]) || isinf(deriv[y])) {
-      deriv[y] = 0;
-    }
-  }
-
-  float r_ball = sqrt(pow(error[x], 2) + pow(error[y], 2));  // distance from the centre of the platform to the ball
-
-  // if ball to far away from center, out of the platform -> move to home position
-  if (r_ball > r_platform) {
-    // the ball left the working area, so drop the accumulated integral instead
-    // of applying it again when the ball comes back
-    integral[x] = 0.0f;
-    integral[y] = 0.0f;
-    goHome();
-  }
-  // if ball is inside the platform -> PID control -> set thetas to move the motors
-  else {
-    // Trapezoidal rule, clamped so the integral alone can never exceed r_max.
-    // Without this the integral keeps growing while the output is saturated.
-    float i_max = (ki > 0.0f) ? r_max / ki : 0.0f;
-    integral[x] = constrain(integral[x] + (error[x] + error_prev[x]) * dt / 2.0f, -i_max, i_max);
-    integral[y] = constrain(integral[y] + (error[y] + error_prev[y]) * dt / 2.0f, -i_max, i_max);
-
-    out[x] = error[x] * kp + deriv[x] * kd + integral[x] * ki;
-    out[y] = error[y] * kp + deriv[y] * kd + integral[y] * ki;
-
-    // error prevention
-    float r_out = sqrt(pow(out[x], 2) + pow(out[y], 2));  // average of the out angle (pitch and roll)
-    // if r_out is greater than r_max, then scale down out values
-    if (r_out > r_max) {
-      out[x] = out[x] * (r_max / r_out);
-      out[y] = out[y] * (r_max / r_out);
-    }
-
-    // compute thetas with IK
-    // out[x] proportional to x-axis -> to achieve linear movement in x(+) -> pitch(+) rotation
-    // out[y] proportional to y-axis -> to achieve linear movement in y(+) -> roll(-) rotation
-    InverseKinematics(hx_home, hy_home, hz_home, roll_home - out[y], pitch_home + out[x], yaw_home);  //hx, hy, hz, roll, pitch, yaw
-
-    // move platform
-    moveServos(vel_control, acc_control);
-  }
-
-  // sets previous error to current error
-  error_prev[x] = error[x];
-  error_prev[y] = error[y];
-}
 
 void setup() {
   Serial.begin(115200);
-  maestroSerial.begin(9600);
+  maestroSerial.begin(115200);
   // maestroSerial.begin(115200);
   // maestroSerial.begin(250000);
   pixy.init();
@@ -299,7 +234,7 @@ void loop() {
     // The loop was blocked (serial, camera, ...). What happened to the ball in
     // the meantime is unknown, so start over instead of extrapolating.
     filterInit = false;
-    resetPid();
+    pid_control.resetPid();
     goHome();
     return;
   }
@@ -309,17 +244,18 @@ void loop() {
   if (usable) {
     if (USE_BALL_FILTER) {
       // the estimate is the PID input; velocity replaces the filtered derivative
-      error[x] = ballFilt[x].p;
-      error[y] = ballFilt[y].p;
-      deriv[x] = ballFilt[x].v;
-      deriv[y] = ballFilt[y].v;
+      pid_control.error[0] = ballFilt[x].p;
+      pid_control.error[1] = ballFilt[y].p;
+      pid_control.deriv[0] = ballFilt[x].v;
+      pid_control.deriv[1] = ballFilt[y].v;
     }
-    PID(dt);
+    if (pid_control.pid(dt,USE_BALL_FILTER)) goHome();
+    moveServos(vel_control, acc_control);
   }
   // no usable measurement -> hold home position and start clean next time
   else {
     filterInit = false;
-    resetPid();
+    pid_control.resetPid();
     goHome();
   }
 
@@ -329,13 +265,13 @@ void loop() {
       lastPrintMs = millis();
       Serial.print(millis());
       Serial.print(',');
-      Serial.print(error[x]);
+      Serial.print(pid_control.error[0]);
       Serial.print(',');
-      Serial.print(error[y]);
+      Serial.print(pid_control.error[1]);
       Serial.print(',');
-      Serial.print(deriv[x]);
+      Serial.print(pid_control.deriv[0]);
       Serial.print(',');
-      Serial.println(deriv[y]);
+      Serial.println(pid_control.deriv[1]);
     }
   }
 }
